@@ -14,98 +14,151 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class MainActivity extends Activity {
-
-    private AudioManager audioManager;
-
-    private Spinner microphoneSpinner;
-    private Spinner outputSpinner;
-    private Spinner modeSpinner;
-
-    private SeekBar gainBar;
-    private SeekBar voxBar;
-
-    private TextView diagnostics;
-    private TextView status;
-
-    private final List<AudioDeviceInfo> microphones = new ArrayList<>();
-    private final List<AudioDeviceInfo> outputs = new ArrayList<>();
+    private AudioManager am;
+    private Spinner micSpinner, outSpinner, modeSpinner;
+    private SeekBar gainBar, voxBar;
+    private TextView diag, status;
+    private final List<AudioDeviceInfo> mics = new ArrayList<>();
+    private final List<AudioDeviceInfo> outs = new ArrayList<>();
 
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
+    protected void onCreate(Bundle b) {
+        super.onCreate(b);
+        am = (AudioManager) getSystemService(AUDIO_SERVICE);
 
-        audioManager =
-                (AudioManager) getSystemService(AUDIO_SERVICE);
-
-        ScrollView scroll = new ScrollView(this);
-
+        ScrollView sv = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(30, 40, 30, 50);
-
-        scroll.addView(root);
+        root.setPadding(28, 32, 28, 40);
+        sv.addView(root);
 
         TextView title = new TextView(this);
         title.setText("Y10 Intercom Bridge V2");
-        title.setTextSize(27);
-
+        title.setTextSize(26);
         root.addView(title);
 
-        TextView description = new TextView(this);
-        description.setText(
-                "\nIntercom experimental para dois Y10.\n"
-                + "Selecione microfone, saída e modo de comunicação.\n"
-        );
-
-        root.addView(description);
-
         addLabel(root, "Microfone Bluetooth");
-
-        microphoneSpinner = new Spinner(this);
-        root.addView(microphoneSpinner);
+        micSpinner = new Spinner(this); root.addView(micSpinner);
 
         addLabel(root, "Saída Bluetooth");
-
-        outputSpinner = new Spinner(this);
-        root.addView(outputSpinner);
+        outSpinner = new Spinner(this); root.addView(outSpinner);
 
         addLabel(root, "Modo");
-
         modeSpinner = new Spinner(this);
-
-        ArrayAdapter<String> modeAdapter =
-                new ArrayAdapter<>(
-                        this,
-                        android.R.layout.simple_spinner_dropdown_item,
-                        new String[]{
-                                "Normal — 1 Y10",
-                                "Dual Output — tentar tocar nos 2",
-                                "Rádio / VOX — procurar A e B"
-                        }
-                );
-
-        modeSpinner.setAdapter(modeAdapter);
-
+        modeSpinner.setAdapter(new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_dropdown_item,
+                new String[]{"Normal — 1 Y10", "Dual Output — tentar os 2", "Rádio/VOX — alternar A/B"}));
         root.addView(modeSpinner);
 
-        addLabel(root, "Ganho do microfone");
+        addLabel(root, "Ganho");
+        gainBar = new SeekBar(this); gainBar.setMax(300); gainBar.setProgress(100); root.addView(gainBar);
 
-        gainBar = new SeekBar(this);
-        gainBar.setMax(300);
-        gainBar.setProgress(100);
+        addLabel(root, "VOX");
+        voxBar = new SeekBar(this); voxBar.setMax(100); voxBar.setProgress(20); root.addView(voxBar);
 
-        root.addView(gainBar);
+        Button refresh = new Button(this); refresh.setText("ATUALIZAR Y10"); root.addView(refresh);
+        Button testA = new Button(this); testA.setText("TESTAR Y10 A"); root.addView(testA);
+        Button testB = new Button(this); testB.setText("TESTAR Y10 B"); root.addView(testB);
+        Button start = new Button(this); start.setText("INICIAR INTERCOM"); root.addView(start);
+        Button stop = new Button(this); stop.setText("PARAR"); root.addView(stop);
 
-        addLabel(root, "Sensibilidade VOX");
+        status = new TextView(this); status.setText("\nStatus: parado"); root.addView(status);
+        diag = new TextView(this); root.addView(diag);
 
-        voxBar = new SeekBar(this);
-        voxBar.setMax(100);
-        voxBar.setProgress(20);
+        setContentView(sv);
 
-        root.addView(voxBar);
+        refresh.setOnClickListener(v -> refreshDevices());
+        testA.setOnClickListener(v -> { micSpinner.setSelection(0); startBridge(); });
+        testB.setOnClickListener(v -> {
+            if (mics.size() > 1) { micSpinner.setSelection(1); startBridge(); }
+            else Toast.makeText(this, "Segundo Y10 de comunicação não detectado.", Toast.LENGTH_LONG).show();
+        });
+        start.setOnClickListener(v -> startBridge());
+        stop.setOnClickListener(v -> {
+            stopService(new Intent(this, BridgeService.class));
+            status.setText("\nStatus: parado");
+        });
 
-        Button refresh = new Button(this);
-        refresh.setText("ATUALIZAR Y10");
+        requestPerms();
+        refreshDevices();
+    }
+
+    private void addLabel(LinearLayout r, String s) {
+        TextView t = new TextView(this); t.setText("\n" + s); t.setTextSize(16); r.addView(t);
+    }
+
+    private void refreshDevices() {
+        mics.clear(); outs.clear();
+        List<String> mn = new ArrayList<>(), on = new ArrayList<>();
+
+        if (Build.VERSION.SDK_INT >= 31) {
+            try {
+                for (AudioDeviceInfo d : am.getAvailableCommunicationDevices()) {
+                    if (d.getType() == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                        d.getType() == AudioDeviceInfo.TYPE_BLE_HEADSET) {
+                        mics.add(d); mn.add(name(d));
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        for (AudioDeviceInfo d : am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+            int t = d.getType();
+            if (t == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                t == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                t == AudioDeviceInfo.TYPE_BLE_HEADSET) {
+                outs.add(d); on.add(name(d));
+            }
+        }
+
+        if (mn.isEmpty()) mn.add("Nenhum Y10 de comunicação detectado");
+        on.add(0, "AUTOMÁTICO / TENTAR OS DOIS");
+
+        micSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, mn));
+        outSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, on));
+
+        StringBuilder s = new StringBuilder("\nDIAGNÓSTICO\n");
+        s.append("Microfones de comunicação: ").append(mics.size()).append("\n");
+        for (int i=0;i<mics.size();i++) s.append("MIC ").append(i+1).append(": ").append(name(mics.get(i))).append("\n");
+        s.append("Saídas Bluetooth: ").append(outs.size()).append("\n");
+        for (int i=0;i<outs.size();i++) s.append("OUT ").append(i+1).append(": ").append(name(outs.get(i))).append("\n");
+        diag.setText(s.toString());
+    }
+
+    private String name(AudioDeviceInfo d) {
+        return d.getProductName() + " [ID " + d.getId() + "]";
+    }
+
+    private void startBridge() {
+        if (requestPerms()) return;
+        Intent i = new Intent(this, BridgeService.class);
+        i.putExtra("input", micSpinner.getSelectedItemPosition());
+        i.putExtra("output", outSpinner.getSelectedItemPosition()-1);
+        i.putExtra("mode", modeSpinner.getSelectedItemPosition());
+        i.putExtra("gain", gainBar.getProgress());
+        i.putExtra("vox", voxBar.getProgress());
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+        status.setText("\nStatus: intercom iniciado");
+    }
+
+    private boolean requestPerms() {
+        if (Build.VERSION.SDK_INT < 23) return false;
+        List<String> p = new ArrayList<>();
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+            p.add(Manifest.permission.RECORD_AUDIO);
+        if (Build.VERSION.SDK_INT >= 31 &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+            p.add(Manifest.permission.BLUETOOTH_CONNECT);
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            p.add(Manifest.permission.POST_NOTIFICATIONS);
+        if (!p.isEmpty()) {
+            requestPermissions(p.toArray(new String[0]), 100);
+            return true;
+        }
+        return false;
+    }
+}
 
         root.addView(refresh);
 
