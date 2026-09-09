@@ -26,8 +26,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class BridgeService extends Service {
 
-    private static final String CHANNEL_ID = "y10_bridge_v2";
-    private static final int NOTIFICATION_ID = 202;
+    private static final String CHANNEL_ID = "y10_bridge_dual";
+    private static final int NOTIFICATION_ID = 303;
 
     private AudioManager audioManager;
     private AudioRecord recorder;
@@ -35,21 +35,24 @@ public class BridgeService extends Service {
     private PowerManager.WakeLock wakeLock;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
-    private final List<AudioDeviceInfo> communicationDevices = new ArrayList<>();
-    private final List<AudioDeviceInfo> outputDevices = new ArrayList<>();
+
+    private final List<AudioDeviceInfo> bluetoothInputs = new ArrayList<>();
+    private final List<AudioDeviceInfo> bluetoothOutputs = new ArrayList<>();
 
     @Override
     public void onCreate() {
         super.onCreate();
 
-        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        audioManager =
+                (AudioManager) getSystemService(Context.AUDIO_SERVICE);
 
         if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID,
-                    "Y10 Intercom V2",
-                    NotificationManager.IMPORTANCE_LOW
-            );
+            NotificationChannel channel =
+                    new NotificationChannel(
+                            CHANNEL_ID,
+                            "Y10 Intercom Dual",
+                            NotificationManager.IMPORTANCE_LOW
+                    );
 
             getSystemService(NotificationManager.class)
                     .createNotificationChannel(channel);
@@ -58,280 +61,262 @@ public class BridgeService extends Service {
         PowerManager powerManager =
                 (PowerManager) getSystemService(POWER_SERVICE);
 
-        wakeLock = powerManager.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "Y10Bridge:Audio"
-        );
+        wakeLock =
+                powerManager.newWakeLock(
+                        PowerManager.PARTIAL_WAKE_LOCK,
+                        "Y10Bridge:DualAudio"
+                );
     }
 
     @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
+    public int onStartCommand(
+            Intent intent,
+            int flags,
+            int startId
+    ) {
 
         startForeground(
                 NOTIFICATION_ID,
-                buildNotification("Intercom ativo")
+                buildNotification("Ponte para os dois Y10 ativa")
         );
 
         if (!wakeLock.isHeld()) {
             wakeLock.acquire();
         }
 
-        final int inputIndex = intent.getIntExtra("input", 0);
-        final int outputIndex = intent.getIntExtra("output", -1);
-        final int mode = intent.getIntExtra("mode", 0);
-        final int gain = intent.getIntExtra("gain", 100);
-        final int vox = intent.getIntExtra("vox", 20);
+        final int gain =
+                intent.getIntExtra("gain", 100);
 
         running.set(false);
         cleanupAudio();
 
-        new Thread(() ->
-                runBridge(
-                        inputIndex,
-                        outputIndex,
-                        mode,
-                        gain,
-                        vox
-                ),
-                "Y10BridgeV2"
+        new Thread(
+                () -> runDualBridge(gain),
+                "Y10DualBridge"
         ).start();
 
         return START_STICKY;
     }
 
-    private void refreshDevices() {
+    private void scanBluetoothDevices() {
 
-        communicationDevices.clear();
-        outputDevices.clear();
+        bluetoothInputs.clear();
+        bluetoothOutputs.clear();
 
-        if (Build.VERSION.SDK_INT >= 31) {
-            try {
-                for (AudioDeviceInfo device :
-                        audioManager.getAvailableCommunicationDevices()) {
+        AudioDeviceInfo[] inputs =
+                audioManager.getDevices(
+                        AudioManager.GET_DEVICES_INPUTS
+                );
 
-                    int type = device.getType();
-
-                    if (type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-                            type == AudioDeviceInfo.TYPE_BLE_HEADSET) {
-                        communicationDevices.add(device);
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-        }
-
-        for (AudioDeviceInfo device :
-                audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+        for (AudioDeviceInfo device : inputs) {
 
             int type = device.getType();
 
-            if (type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
-                    type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-                    type == AudioDeviceInfo.TYPE_BLE_HEADSET) {
-                outputDevices.add(device);
+            if (
+                    type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                    ||
+                    type == AudioDeviceInfo.TYPE_BLE_HEADSET
+            ) {
+                bluetoothInputs.add(device);
+            }
+        }
+
+        AudioDeviceInfo[] outputs =
+                audioManager.getDevices(
+                        AudioManager.GET_DEVICES_OUTPUTS
+                );
+
+        for (AudioDeviceInfo device : outputs) {
+
+            int type = device.getType();
+
+            if (
+                    type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+                    ||
+                    type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                    ||
+                    type == AudioDeviceInfo.TYPE_BLE_HEADSET
+                    ||
+                    type == AudioDeviceInfo.TYPE_BLE_SPEAKER
+            ) {
+                bluetoothOutputs.add(device);
             }
         }
     }
 
-    private void runBridge(
-            int inputIndex,
-            int outputIndex,
-            int mode,
-            int gain,
-            int vox
-    ) {
+    private void runDualBridge(int gain) {
 
         try {
 
-            audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+            /*
+             * PONTO PRINCIPAL:
+             *
+             * NÃO usamos MODE_IN_COMMUNICATION.
+             * NÃO usamos setCommunicationDevice().
+             * NÃO iniciamos SCO manualmente.
+             *
+             * Isso evita quebrar a saída dupla de mídia do HyperOS.
+             */
+            audioManager.setMode(
+                    AudioManager.MODE_NORMAL
+            );
 
-            refreshDevices();
+            scanBluetoothDevices();
 
-            if (Build.VERSION.SDK_INT >= 31) {
+            final int sampleRate = 48000;
+            final int encoding =
+                    AudioFormat.ENCODING_PCM_16BIT;
 
-                if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
-                        != PackageManager.PERMISSION_GRANTED) {
-                    return;
-                }
-
-                if (!communicationDevices.isEmpty()) {
-
-                    int safeInput = Math.max(
-                            0,
-                            Math.min(
-                                    inputIndex,
-                                    communicationDevices.size() - 1
-                            )
+            int inputMin =
+                    AudioRecord.getMinBufferSize(
+                            sampleRate,
+                            AudioFormat.CHANNEL_IN_MONO,
+                            encoding
                     );
 
-                    audioManager.setCommunicationDevice(
-                            communicationDevices.get(safeInput)
+            int outputMin =
+                    AudioTrack.getMinBufferSize(
+                            sampleRate,
+                            AudioFormat.CHANNEL_OUT_STEREO,
+                            encoding
                     );
+
+            int bufferSize =
+                    Math.max(
+                            8192,
+                            Math.max(
+                                    inputMin,
+                                    outputMin
+                            ) * 2
+                    );
+
+            recorder =
+                    new AudioRecord(
+                            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                            sampleRate,
+                            AudioFormat.CHANNEL_IN_MONO,
+                            encoding,
+                            bufferSize
+                    );
+
+            /*
+             * Se o Android expuser um microfone Bluetooth como INPUT,
+             * tentamos usá-lo SEM mudar o telefone inteiro para modo chamada.
+             *
+             * Se não expuser, o sistema cai no microfone do Redmi.
+             */
+            if (!bluetoothInputs.isEmpty()) {
+
+                try {
+                    recorder.setPreferredDevice(
+                            bluetoothInputs.get(0)
+                    );
+                } catch (Throwable ignored) {
                 }
-
-            } else {
-
-                audioManager.startBluetoothSco();
-                audioManager.setBluetoothScoOn(true);
-
-                Thread.sleep(1000);
             }
 
-            final int sampleRate = 16000;
-            final int encoding = AudioFormat.ENCODING_PCM_16BIT;
-            final int inputChannel = AudioFormat.CHANNEL_IN_MONO;
-            final int outputChannel = AudioFormat.CHANNEL_OUT_MONO;
-
-            int inputMin = AudioRecord.getMinBufferSize(
-                    sampleRate,
-                    inputChannel,
-                    encoding
-            );
-
-            int outputMin = AudioTrack.getMinBufferSize(
-                    sampleRate,
-                    outputChannel,
-                    encoding
-            );
-
-            int bufferSize = Math.max(
-                    4096,
-                    Math.max(inputMin, outputMin) * 2
-            );
-
-            recorder = new AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                    sampleRate,
-                    inputChannel,
-                    encoding,
-                    bufferSize
-            );
-
-            AudioAttributes audioAttributes =
+            AudioAttributes attributes =
                     new AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setUsage(
+                                    AudioAttributes.USAGE_MEDIA
+                            )
                             .setContentType(
                                     AudioAttributes.CONTENT_TYPE_SPEECH
                             )
                             .build();
 
-            AudioFormat audioFormat =
+            AudioFormat format =
                     new AudioFormat.Builder()
                             .setEncoding(encoding)
                             .setSampleRate(sampleRate)
-                            .setChannelMask(outputChannel)
+                            .setChannelMask(
+                                    AudioFormat.CHANNEL_OUT_STEREO
+                            )
                             .build();
 
-            player = new AudioTrack(
-                    audioAttributes,
-                    audioFormat,
-                    bufferSize,
-                    AudioTrack.MODE_STREAM,
-                    AudioManager.AUDIO_SESSION_ID_GENERATE
-            );
+            player =
+                    new AudioTrack(
+                            attributes,
+                            format,
+                            bufferSize,
+                            AudioTrack.MODE_STREAM,
+                            AudioManager.AUDIO_SESSION_ID_GENERATE
+                    );
 
-            if (outputIndex >= 0 &&
-                    outputIndex < outputDevices.size()) {
-
-                player.setPreferredDevice(
-                        outputDevices.get(outputIndex)
-                );
-            }
-
+            /*
+             * MUITO IMPORTANTE:
+             *
+             * NÃO usamos setPreferredDevice() no AudioTrack.
+             *
+             * A saída fica "MEDIA / AUTOMÁTICA", permitindo ao HyperOS
+             * continuar duplicando a mídia para os dois Y10,
+             * exatamente como ocorre quando você toca música.
+             */
             recorder.startRecording();
             player.play();
 
             running.set(true);
 
-            short[] buffer =
+            short[] monoBuffer =
                     new short[bufferSize / 2];
 
-            int activeCommunicationDevice = Math.max(
-                    0,
-                    Math.min(
-                            inputIndex,
-                            Math.max(
-                                    0,
-                                    communicationDevices.size() - 1
-                            )
-                    )
-            );
-
-            long silenceSince =
-                    System.currentTimeMillis();
+            short[] stereoBuffer =
+                    new short[bufferSize];
 
             while (running.get()) {
 
-                int samples = recorder.read(
-                        buffer,
-                        0,
-                        buffer.length
-                );
+                int samples =
+                        recorder.read(
+                                monoBuffer,
+                                0,
+                                monoBuffer.length
+                        );
 
                 if (samples <= 0) {
                     continue;
                 }
 
                 float digitalGain =
-                        Math.max(0f, gain / 100f);
+                        Math.max(
+                                0.0f,
+                                gain / 100.0f
+                        );
 
-                long energy = 0;
+                int stereoSamples = 0;
 
                 for (int i = 0; i < samples; i++) {
 
                     int value =
-                            (int) (buffer[i] * digitalGain);
+                            (int) (
+                                    monoBuffer[i]
+                                            * digitalGain
+                            );
 
-                    value = Math.max(
-                            -32768,
-                            Math.min(32767, value)
-                    );
+                    value =
+                            Math.max(
+                                    -32768,
+                                    Math.min(
+                                            32767,
+                                            value
+                                    )
+                            );
 
-                    buffer[i] = (short) value;
-                    energy += Math.abs(value);
-                }
+                    short s =
+                            (short) value;
 
-                int averageEnergy =
-                        (int) (
-                                energy /
-                                Math.max(1, samples)
-                        );
-
-                if (mode == 2 &&
-                        Build.VERSION.SDK_INT >= 31 &&
-                        communicationDevices.size() >= 2) {
-
-                    long now =
-                            System.currentTimeMillis();
-
-                    int threshold =
-                            150 + (vox * 50);
-
-                    if (averageEnergy > threshold) {
-
-                        silenceSince = now;
-
-                    } else if (
-                            now - silenceSince > 650
-                    ) {
-
-                        activeCommunicationDevice =
-                                (activeCommunicationDevice + 1) % 2;
-
-                        audioManager.setCommunicationDevice(
-                                communicationDevices.get(
-                                        activeCommunicationDevice
-                                )
-                        );
-
-                        silenceSince = now;
-                    }
+                    /*
+                     * Copia a voz igualmente para L e R.
+                     * Depois o HyperOS decide para quais dispositivos
+                     * de mídia Bluetooth mandar o áudio.
+                     */
+                    stereoBuffer[stereoSamples++] = s;
+                    stereoBuffer[stereoSamples++] = s;
                 }
 
                 player.write(
-                        buffer,
+                        stereoBuffer,
                         0,
-                        samples,
+                        stereoSamples,
                         AudioTrack.WRITE_BLOCKING
                 );
             }
@@ -382,27 +367,21 @@ public class BridgeService extends Service {
         recorder = null;
         player = null;
 
+        /*
+         * Não limpamos CommunicationDevice porque esta versão
+         * não assume controle da rota de chamada.
+         */
         try {
-
-            if (Build.VERSION.SDK_INT >= 31) {
-
-                audioManager.clearCommunicationDevice();
-
-            } else {
-
-                audioManager.setBluetoothScoOn(false);
-                audioManager.stopBluetoothSco();
-            }
-
             audioManager.setMode(
                     AudioManager.MODE_NORMAL
             );
-
         } catch (Exception ignored) {
         }
     }
 
-    private Notification buildNotification(String text) {
+    private Notification buildNotification(
+            String text
+    ) {
 
         PendingIntent pendingIntent =
                 PendingIntent.getActivity(
@@ -412,33 +391,39 @@ public class BridgeService extends Service {
                                 this,
                                 MainActivity.class
                         ),
-                        PendingIntent.FLAG_IMMUTABLE |
-                                PendingIntent.FLAG_UPDATE_CURRENT
+                        PendingIntent.FLAG_IMMUTABLE
+                                |
+                        PendingIntent.FLAG_UPDATE_CURRENT
                 );
 
         Notification.Builder builder;
 
         if (Build.VERSION.SDK_INT >= 26) {
+
             builder =
                     new Notification.Builder(
                             this,
                             CHANNEL_ID
                     );
+
         } else {
+
             builder =
                     new Notification.Builder(this);
         }
 
         return builder
                 .setContentTitle(
-                        "Y10 Intercom Bridge V2"
+                        "Y10 Intercom Bridge"
                 )
                 .setContentText(text)
                 .setSmallIcon(
                         android.R.drawable.stat_sys_headset
                 )
                 .setOngoing(true)
-                .setContentIntent(pendingIntent)
+                .setContentIntent(
+                        pendingIntent
+                )
                 .build();
     }
 
@@ -448,10 +433,15 @@ public class BridgeService extends Service {
         cleanupAudio();
 
         try {
-            if (wakeLock != null &&
-                    wakeLock.isHeld()) {
+
+            if (
+                    wakeLock != null
+                            &&
+                    wakeLock.isHeld()
+            ) {
                 wakeLock.release();
             }
+
         } catch (Exception ignored) {
         }
 
@@ -459,7 +449,9 @@ public class BridgeService extends Service {
     }
 
     @Override
-    public IBinder onBind(Intent intent) {
+    public IBinder onBind(
+            Intent intent
+    ) {
         return null;
     }
 }
