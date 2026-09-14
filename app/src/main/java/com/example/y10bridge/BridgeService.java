@@ -6,8 +6,6 @@ import android.media.*;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
-import androidx.annotation.Nullable;
-
 import java.util.ArrayList;
 import java.util.List;
 
@@ -365,7 +363,6 @@ public class BridgeService extends Service {
         super.onDestroy();
     }
 
-    @Nullable
     @Override
     public IBinder onBind(Intent intent) {
         return null;
